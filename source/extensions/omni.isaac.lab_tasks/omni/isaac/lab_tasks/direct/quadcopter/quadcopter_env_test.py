@@ -52,7 +52,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10.0
     decimation = 2
     action_space = 4
-    observation_space = 12
+    observation_space = 10
     state_space = 0
     debug_vis = True
 
@@ -110,7 +110,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         # Goal position
-        self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self._desired_pos_w = torch.zeros(self.num_envs, device=self.device)  # Only storing desired height
 
         # Logging
         self._episode_sums = {
@@ -154,15 +154,13 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
     def _get_observations(self) -> dict:
-        desired_pos_b, _ = subtract_frame_transforms(
-            self._robot.data.root_link_state_w[:, :3], self._robot.data.root_link_state_w[:, 3:7], self._desired_pos_w
-        )
+        height_error = self._desired_pos_w - self._robot.data.root_link_pos_w[:, 2]
         obs = torch.cat(
             [
                 self._robot.data.root_com_lin_vel_b,
                 self._robot.data.root_com_ang_vel_b,
                 self._robot.data.projected_gravity_b,
-                desired_pos_b,
+                height_error.unsqueeze(-1),             # Height error (reshaped to 2D tensor)
             ],
             dim=-1,
         )
@@ -178,12 +176,15 @@ class QuadcopterEnv(DirectRLEnv):
         
         lin_vel = torch.sum(torch.square(self._robot.data.root_com_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_com_ang_vel_b), dim=1)
-        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        
+        # Only consider z-coordinate for distance to goal
+        height_error = torch.abs(self._desired_pos_w - self._robot.data.root_link_pos_w[:, 2])
+        height_error_mapped = 1 - torch.tanh(height_error / 0.4)  # Sharper mapping for height control
+
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "distance_to_goal": height_error_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -202,11 +203,12 @@ class QuadcopterEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        # Logging
-        final_distance_to_goal = torch.linalg.norm(
-            self._desired_pos_w[env_ids] - self._robot.data.root_link_pos_w[env_ids], dim=1
+        # Logging - modified to only track height error
+        final_height_error = torch.abs(
+            self._desired_pos_w[env_ids] - self._robot.data.root_link_pos_w[env_ids, 2]
         ).mean()
         extras = dict()
+        
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
@@ -216,7 +218,7 @@ class QuadcopterEnv(DirectRLEnv):
         extras = dict()
         extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
-        extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
+        extras["Metrics/final_height_error"] = final_height_error.item()
         self.extras["log"].update(extras)
 
         self._robot.reset(env_ids)
@@ -226,10 +228,8 @@ class QuadcopterEnv(DirectRLEnv):
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         self._actions[env_ids] = 0.0
-        # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        # Sample new commands, assuming that origin-x and origin-y are 0
+        self._desired_pos_w[env_ids] = torch.zeros_like(self._desired_pos_w[env_ids]).uniform_(0.5, 1.5)
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
