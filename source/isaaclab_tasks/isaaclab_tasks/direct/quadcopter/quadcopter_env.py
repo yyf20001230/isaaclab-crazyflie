@@ -110,6 +110,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self._radius = torch.zeros(self.num_envs, 1, device=self.device)
 
         # Logging
         self._episode_sums = {
@@ -165,10 +166,40 @@ class QuadcopterEnv(DirectRLEnv):
         )
         observations = {"policy": obs}
         return observations
+    
+    def _get_simulation_time(self):
+        return self.episode_length_buf * self.step_dt
+
+    def _update_trajectories(self):
+        """
+        update the desired coordinate that the drone must fly to in order to complete a circle trajectory, 
+        given the current time of the simulation. 
+        """
+        t = self._get_simulation_time()
+
+        # Create circular trajectory in the x-y plane
+        angles = 2 * torch.pi * t / self.cfg.episode_length_s
+        
+        # Initialize trajectory positions with zeros
+        trajectory_positions = torch.zeros_like(self._desired_pos_w)
+        
+        # Set x and y coordinates based on circular motion
+        trajectory_positions[:, 0] = self._radius[:, 0] * torch.cos(angles)  # x coordinate
+        trajectory_positions[:, 1] = self._radius[:, 0] * torch.sin(angles)  # y coordinate
+        
+        # Add height component (fixed height)
+        trajectory_positions[:, 2] = 1.0
+        
+        # Add environment origins to position the trajectory correctly in each environment
+        trajectory_positions[:, :2] += self._terrain.env_origins[:, :2]
+        
+        # Update desired position
+        self._desired_pos_w = trajectory_positions
 
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
+        self._update_trajectories()
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
         rewards = {
@@ -216,9 +247,13 @@ class QuadcopterEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pow_w[env_ids, :2])
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2])
+        self._radius[env_ids, 0] = torch.empty(1).uniform_(0.1, 0.5).item()
+
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
