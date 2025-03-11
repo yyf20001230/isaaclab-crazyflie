@@ -93,9 +93,14 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     moment_scale = 0.01
 
     # reward scales
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
+    lin_vel_reward_scale = -0.02
+    ang_vel_reward_scale = -0.005
     distance_to_goal_reward_scale = 15.0
+
+    # Add new reward scales to the class or config if you want to tune them separately
+    tilt_penalty_scale = -0.1
+    smoothness_reward_scale = 0.05
+    energy_efficiency_scale = 0.01
 
 
 class QuadcopterEnv(DirectRLEnv):
@@ -111,6 +116,8 @@ class QuadcopterEnv(DirectRLEnv):
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self._radius = torch.zeros(self.num_envs, 1, device=self.device)
+        self._rot_matrix = torch.zeros((self.num_envs, 3, 3), device=self.device)
+        self._action_diff = torch.zeros_like(self._actions, device=self.device)
 
         # Logging
         self._episode_sums = {
@@ -196,16 +203,51 @@ class QuadcopterEnv(DirectRLEnv):
         # Update desired position
         self._desired_pos_w = trajectory_positions
 
+    def _update_rot_matrix(self, quat):
+        # Calculate the tilt angle (deviation from upright position)
+        # We need the rotation matrix to extract the z-axis orientation
+        
+        # Convert quaternion to rotation matrix (focusing on z-axis alignment)
+        x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        self._rot_matrix[:, 0, 2] = 2.0 * (x * z + w * y)
+        self._rot_matrix[:, 1, 2] = 2.0 * (y * z - w * x)
+        self._rot_matrix[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         self._update_trajectories()
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+
+        # Extract rotation quaternion and convert to euler angles to measure tilt
+        quat = self._robot.data.root_state_w[:, 3:7]
+        self._update_rot_matrix(quat)
+
+        # Calculate tilt as the angle between drone's z-axis and world z-axis
+        z_alignment = self._rot_matrix[:, 2, 2]  # Cosine of the tilt angle
+        tilt_angle = torch.acos(torch.clamp(z_alignment, -1.0, 1.0))
+
+        # Calculate action smoothness (change in actions between steps)
+        if hasattr(self, "_prev_actions"):
+            self.action_diff = torch.sum(torch.square(self._actions - self._prev_actions), dim=1)
+        self._prev_actions = self._actions.clone()
+
+        # Calculate energy consumption (proportional to thrust)
+        energy_consumption = torch.sum(torch.square(self._thrust), dim=(1, 2))
+
+        # New reward components
+        tilt_penalty = torch.square(tilt_angle)
+        smoothness_reward = 1.0 / (1.0 + 10.0 * self.action_diff)
+        energy_efficiency = 1.0 / (1.0 + 0.01 * energy_consumption)
+
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "tilt_penalty": tilt_penalty * self.cfg.tilt_penalty_scale * self.step_dt,
+            "smoothness": smoothness_reward * self.cfg.smoothness_reward_scale * self.step_dt,
+            "energy_efficiency": energy_efficiency * self.cfg.energy_efficiency_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -248,11 +290,13 @@ class QuadcopterEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         # Sample new commands
         # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pow_w[env_ids, :2])
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2])
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2])
         self._radius[env_ids, 0] = torch.empty(1).uniform_(0.1, 0.5).item()
+        self._rot_matrix = torch.zeros_like(self._rot_matrix)
+        self._action_diff = torch.zeros_like(self._actions)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
