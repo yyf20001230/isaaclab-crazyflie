@@ -49,8 +49,8 @@ class QuadcopterEnvWindow(BaseEnvWindow):
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 10.0
-    decimation = 2
+    episode_length_s = 30.0
+    decimation = 6
     action_space = 4
     observation_space = 12
     state_space = 0
@@ -113,6 +113,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self._radius = torch.zeros(self.num_envs, 1, device=self.device)
@@ -126,6 +127,9 @@ class QuadcopterEnv(DirectRLEnv):
                 "lin_vel",
                 "ang_vel",
                 "distance_to_goal",
+                "tilt_panelty",
+                "smoothness",
+                "energy_efficiency"
             ]
         }
         # Get specific body indices
