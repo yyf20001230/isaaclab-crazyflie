@@ -49,8 +49,8 @@ class QuadcopterEnvWindow(BaseEnvWindow):
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 30.0
-    decimation = 6
+    episode_length = 100.0
+    decimation = 4
     action_space = 4
     observation_space = 12
     state_space = 0
@@ -93,14 +93,14 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     moment_scale = 0.01
 
     # reward scales
-    lin_vel_reward_scale = -0.02
-    ang_vel_reward_scale = -0.005
-    distance_to_goal_reward_scale = 15.0
+    lin_vel_reward_scale = -0.05
+    ang_vel_reward_scale = -0.05
+    distance_to_goal_reward_scale = 16.0
 
     # Add new reward scales to the class or config if you want to tune them separately
-    tilt_penalty_scale = -0.1
-    smoothness_reward_scale = 0.05
-    energy_efficiency_scale = 0.01
+    tilt_penalty_scale = -0.05
+    smoothness_reward_scale = 0.2
+    energy_efficiency_scale = 0.1
 
 
 class QuadcopterEnv(DirectRLEnv):
@@ -118,7 +118,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self._radius = torch.zeros(self.num_envs, 1, device=self.device)
         self._rot_matrix = torch.zeros((self.num_envs, 3, 3), device=self.device)
-        self._action_diff = torch.zeros_like(self._actions, device=self.device)
+        self._action_diff = torch.zeros(self.num_envs, device=self.device)
 
         # Logging
         self._episode_sums = {
@@ -129,7 +129,7 @@ class QuadcopterEnv(DirectRLEnv):
                 "distance_to_goal",
                 "tilt_penalty",
                 "smoothness",
-                "energy_efficiency"
+                "energy_efficiency",
             ]
         }
         # Get specific body indices
@@ -234,7 +234,7 @@ class QuadcopterEnv(DirectRLEnv):
 
         # Calculate action smoothness (change in actions between steps)
         if hasattr(self, "_prev_actions"):
-            self.action_diff = torch.sum(torch.square(self._actions - self._prev_actions), dim=1)
+            self._action_diff = torch.sum(torch.square(self._actions - self._prev_actions), dim=1)
         self._prev_actions = self._actions.clone()
 
         # Calculate energy consumption (proportional to thrust)
@@ -242,7 +242,7 @@ class QuadcopterEnv(DirectRLEnv):
 
         # New reward components
         tilt_penalty = torch.square(tilt_angle)
-        smoothness_reward = 1.0 / (1.0 + 10.0 * self.action_diff)
+        smoothness_reward = 1.0 / (1.0 + 10.0 * self._action_diff)
         energy_efficiency = 1.0 / (1.0 + 0.01 * energy_consumption)
 
         rewards = {
@@ -300,7 +300,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2])
         self._radius[env_ids, 0] = torch.empty(1).uniform_(0.1, 0.5).item()
         self._rot_matrix = torch.zeros_like(self._rot_matrix)
-        self._action_diff = torch.zeros_like(self._actions)
+        self._action_diff = torch.zeros_like(self.num_envs, device=self.device)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
