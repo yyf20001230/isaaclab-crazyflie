@@ -127,7 +127,7 @@ class QuadcopterEnv(DirectRLEnv):
                 "lin_vel",
                 "ang_vel",
                 "distance_to_goal",
-                "tilt_panelty",
+                "tilt_penalty",
                 "smoothness",
                 "energy_efficiency"
             ]
